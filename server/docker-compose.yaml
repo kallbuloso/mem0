@@ -2,7 +2,7 @@ name: mem0-dev
 
 services:
   mem0:
-    image: mem0-mem0:latest
+    image: mem0/mem0-api-server:latest
     # build:
     #   context: ..  # Set context to parent directory
     #   dockerfile: server/dev.Dockerfile
