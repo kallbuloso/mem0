@@ -7,7 +7,7 @@ description: >
   Also triggers automatically after sufficient activity (configurable).
 user-invocable: true
 metadata:
-  {"openclaw": {"emoji": "💤"}}
+  {"openclaw": {"emoji": "💤", "requires": {"env": ["MEM0_API_KEY"], "bins": []}}}
 ---
 
 # Memory Consolidation
@@ -33,9 +33,6 @@ Identify which memories need action. Use the tools to investigate.
 
 **Search for recent additions:**
 Call `memory_search` with a `created_at` filter to find memories added since the last consolidation. These are the most likely to need merging or cleanup.
-
-**Check edit history on suspicious entries:**
-If a memory looks like it was updated multiple times or has contradictory content, call `memory_history` on it to understand how it evolved.
 
 **Classify each target into one of these actions:**
 - DELETE: contains credentials, expired by TTL, pure noise, raw tool output, standalone timestamps

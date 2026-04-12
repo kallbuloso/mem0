@@ -81,8 +81,7 @@ class PlatformProvider implements Mem0Provider {
 
   constructor(
     private readonly apiKey: string,
-    private readonly orgId?: string,
-    private readonly projectId?: string,
+    private readonly baseUrl?: string,
   ) {}
 
   private async ensureClient(): Promise<void> {
@@ -97,11 +96,13 @@ class PlatformProvider implements Mem0Provider {
 
   private async _init(): Promise<void> {
     const { default: MemoryClient } = await import("mem0ai");
-    const opts: { apiKey: string; org_id?: string; project_id?: string } = {
+    const opts: {
+      apiKey: string;
+      host?: string;
+    } = {
       apiKey: this.apiKey,
     };
-    if (this.orgId) opts.org_id = this.orgId;
-    if (this.projectId) opts.project_id = this.projectId;
+    if (this.baseUrl) opts.host = this.baseUrl;
     this.client = new MemoryClient(opts);
   }
 
@@ -116,7 +117,6 @@ class PlatformProvider implements Mem0Provider {
       opts.custom_instructions = options.custom_instructions;
     if (options.custom_categories)
       opts.custom_categories = options.custom_categories;
-    if (options.enable_graph) opts.enable_graph = options.enable_graph;
     if (options.output_format) opts.output_format = options.output_format;
     if (options.source) opts.source = options.source;
     // Agentic harness: direct storage bypass
@@ -133,20 +133,11 @@ class PlatformProvider implements Mem0Provider {
 
   async search(query: string, options: SearchOptions): Promise<MemoryItem[]> {
     await this.ensureClient();
-    // Base filters: always scope by user_id, optionally by run_id
-    const baseFilters: Record<string, unknown> = { user_id: options.user_id };
-    if (options.run_id) baseFilters.run_id = options.run_id;
-
-    // Merge agent-provided filters (created_at ranges, metadata, etc.)
-    // with base filters. Agent filters extend, never override user scoping.
-    const mergedFilters = options.filters
-      ? { AND: [baseFilters, options.filters] }
-      : baseFilters;
-
     const opts: Record<string, unknown> = {
       api_version: "v2",
-      filters: mergedFilters,
+      user_id: options.user_id,
     };
+    if (options.run_id) opts.run_id = options.run_id;
     if (options.top_k != null) opts.top_k = options.top_k;
     if (options.threshold != null) opts.threshold = options.threshold;
     if (options.keyword_search != null)
@@ -155,6 +146,14 @@ class PlatformProvider implements Mem0Provider {
     if (options.filter_memories != null)
       opts.filter_memories = options.filter_memories;
     if (options.categories != null) opts.categories = options.categories;
+    const baseFilters: Record<string, unknown> = { user_id: options.user_id };
+    if (options.run_id) baseFilters.run_id = options.run_id;
+
+    if (options.filters) {
+      opts.filters = { AND: [baseFilters, options.filters] };
+    } else {
+      opts.filters = baseFilters;
+    }
 
     const results = await this.client.search(query, opts);
     return normalizeSearchResults(results);
@@ -168,10 +167,16 @@ class PlatformProvider implements Mem0Provider {
 
   async getAll(options: ListOptions): Promise<MemoryItem[]> {
     await this.ensureClient();
-    const opts: Record<string, unknown> = { user_id: options.user_id };
-    if (options.run_id) opts.run_id = options.run_id;
+    const opts: Record<string, unknown> = {
+      api_version: "v2",
+      user_id: options.user_id,
+      filters: { user_id: options.user_id },
+    };
+    if (options.run_id) {
+      opts.run_id = options.run_id;
+      (opts.filters as Record<string, unknown>).run_id = options.run_id;
+    }
     if (options.page_size != null) opts.page_size = options.page_size;
-    if (options.source) opts.source = options.source;
 
     const results = await this.client.getAll(opts);
     if (Array.isArray(results)) return results.map(normalizeMemoryItem);
@@ -196,9 +201,7 @@ class PlatformProvider implements Mem0Provider {
     await this.client.deleteAll({ user_id: userId });
   }
 
-  async history(
-    memoryId: string,
-  ): Promise<
+  async history(memoryId: string): Promise<
     Array<{
       id: string;
       old_memory: string;
@@ -237,15 +240,53 @@ class OSSProvider implements Mem0Provider {
     return this.initPromise;
   }
 
-  private async _init(): Promise<void> {
-    const { Memory } = await import("mem0ai/oss");
-
+  private _buildConfig(disableHistory = false): Record<string, unknown> {
     const config: Record<string, unknown> = { version: "v1.1" };
 
-    if (this.ossConfig?.embedder) config.embedder = this.ossConfig.embedder;
+    const defaultEmbedder = {
+      provider: "openai",
+      config: { model: "text-embedding-3-small" },
+    };
+    const defaultLlm = { provider: "openai", config: { model: "gpt-5.4" } };
+
+    const stripEmpty = (obj: Record<string, unknown>) => {
+      const out = { ...obj };
+      for (const k of Object.keys(out)) {
+        if (out[k] === "") delete out[k];
+      }
+      return out;
+    };
+
+    if (this.ossConfig?.embedder) {
+      const ec = stripEmpty(this.ossConfig.embedder.config ?? {});
+      if (ec.host && !ec.url) {
+        ec.url = ec.host;
+        delete ec.host;
+      }
+      config.embedder = {
+        provider: this.ossConfig.embedder.provider || defaultEmbedder.provider,
+        config: { ...defaultEmbedder.config, ...ec },
+      };
+    } else {
+      config.embedder = defaultEmbedder;
+    }
+
+    if (this.ossConfig?.llm) {
+      const lc = stripEmpty(this.ossConfig.llm.config ?? {});
+      if (lc.host && !lc.url) {
+        lc.url = lc.host;
+        delete lc.host;
+      }
+      config.llm = {
+        provider: this.ossConfig.llm.provider || defaultLlm.provider,
+        config: { ...defaultLlm.config, ...lc },
+      };
+    } else {
+      config.llm = defaultLlm;
+    }
+
     if (this.ossConfig?.vectorStore)
-      config.vectorStore = this.ossConfig.vectorStore;
-    if (this.ossConfig?.llm) config.llm = this.ossConfig.llm;
+      config.vectorStore = { ...this.ossConfig.vectorStore };
 
     if (this.ossConfig?.historyDbPath) {
       const dbPath = this.resolvePath
@@ -254,42 +295,61 @@ class OSSProvider implements Mem0Provider {
       config.historyDbPath = dbPath;
     }
 
-    if (this.ossConfig?.disableHistory) {
+    if (disableHistory || this.ossConfig?.disableHistory) {
       config.disableHistory = true;
     }
 
     if (this.customPrompt) config.customPrompt = this.customPrompt;
+    return config;
+  }
 
+  private async _init(): Promise<void> {
+    const mod = await import("mem0ai/oss");
+    const Memory = mod.Memory;
+    for (const cls of ["PGVector", "RedisDB", "Qdrant"]) {
+      const VectorCls = (mod as any)[cls];
+      if (!VectorCls || VectorCls.prototype.__patched) continue;
+      const origInit = VectorCls.prototype.initialize;
+      VectorCls.prototype.initialize = function (this: any) {
+        if (!this.config?.embeddingModelDims && this.config?.dimension) {
+          this.config.embeddingModelDims = this.config.dimension;
+        }
+        // Qdrant reads this.dimension directly
+        if (!this.dimension && this.config?.dimension) {
+          this.dimension = this.config.dimension;
+        }
+        // Skip premature constructor call when dimensions unknown
+        const dims = this.config?.embeddingModelDims ?? this.dimension;
+        if (!dims) return Promise.resolve();
+        // Run the real initialize only once
+        if (!this._initializePromise) {
+          this._initializePromise = origInit.call(this);
+        }
+        return this._initializePromise;
+      };
+      VectorCls.prototype.__patched = true;
+    }
+
+    let mem: any;
     try {
-      this.memory = new Memory(config);
+      mem = new Memory(this._buildConfig());
     } catch (err) {
-      // If initialization fails (e.g. native SQLite binding resolution under
-      // jiti), retry with history disabled — the history DB is the most common
-      // source of native-binding failures and is not required for core
-      // memory operations.
-      if (!config.disableHistory) {
+      // If constructor fails (e.g. native SQLite binding under jiti/Docker),
+      // retry with a FRESH config that has history disabled.
+      if (!this.ossConfig?.disableHistory) {
         console.warn(
           "[mem0] Memory initialization failed, retrying with history disabled:",
           err instanceof Error ? err.message : err,
         );
-        config.disableHistory = true;
-        this.memory = new Memory(config);
+        mem = new Memory(this._buildConfig(true));
       } else {
         throw err;
       }
     }
 
-    // Force the SDK's internal auto-initialization to complete now.
-    // Without this, concurrent method calls (e.g. auto-recall + search)
-    // both trigger _autoInitialize() simultaneously, causing PGVector's
-    // pg client to call connect() twice → "Client has already been
-    // connected" crash. (#4638)
-    try {
-      await this.memory.getAll({ userId: "__mem0_warmup__" });
-    } catch {
-      // Warmup errors are non-fatal — the SDK may still work for
-      // subsequent calls once its internal state settles.
-    }
+    await mem.getAll({ userId: "__mem0_warmup__" });
+
+    this.memory = mem;
   }
 
   async add(
@@ -383,9 +443,7 @@ class OSSProvider implements Mem0Provider {
     await this.memory.deleteAll({ userId });
   }
 
-  async history(
-    memoryId: string,
-  ): Promise<
+  async history(memoryId: string): Promise<
     Array<{
       id: string;
       old_memory: string;
@@ -398,8 +456,12 @@ class OSSProvider implements Mem0Provider {
     try {
       const result = await this.memory.history(memoryId);
       return Array.isArray(result) ? result : [];
-    } catch {
-      // OSS may not support history depending on config
+    } catch (err) {
+      // OSS may not support history depending on config (e.g. disableHistory)
+      console.warn(
+        "[mem0] OSS history() failed:",
+        err instanceof Error ? err.message : err,
+      );
       return [];
     }
   }
@@ -419,7 +481,7 @@ export function createProvider(
     );
   }
 
-  return new PlatformProvider(cfg.apiKey!, cfg.orgId, cfg.projectId);
+  return new PlatformProvider(cfg.apiKey!, cfg.baseUrl);
 }
 
 // ============================================================================
@@ -444,12 +506,12 @@ export function providerToBackend(
         msgs as Array<{ role: string; content: string }>,
         {
           user_id: opts.userId ?? userId,
+          source: "OPENCLAW",
           ...(opts.runId && { run_id: opts.runId }),
           ...(opts.metadata && { metadata: opts.metadata }),
           ...(opts.immutable && { immutable: true }),
           ...(opts.infer === false && { infer: false }),
           ...(opts.expires && { expiration_date: opts.expires }),
-          ...(opts.enableGraph && { enable_graph: true }),
         },
       );
       return result as unknown as Record<string, unknown>;
@@ -463,6 +525,7 @@ export function providerToBackend(
         keyword_search: opts.keyword,
         reranking: opts.rerank,
         filters: opts.filters,
+        source: "OPENCLAW",
       });
       return results as unknown as Record<string, unknown>[];
     },
@@ -476,6 +539,7 @@ export function providerToBackend(
       const items = await provider.getAll({
         user_id: opts.userId ?? userId,
         page_size: opts.pageSize,
+        source: "OPENCLAW",
       });
       return items as unknown as Record<string, unknown>[];
     },
